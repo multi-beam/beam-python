@@ -19,12 +19,22 @@ from numpy.linalg import cholesky, eig, inv, norm
 #	- evoked fields second moments matrix.
 #
 # Input:
-#	fs	(n_src x n_chan x 3) Numpy array of FS for the source voxels
-#		For example, fs[i,:,1] is a forward solution for a dipole
-#		located in the i-th source voxel and oriented along Y axis.
+#	fs	(n_src x n_chan x 3) Numpy array of "vector" FS for the source
+#		voxels. For example, fs[i,:,1] is a forward solution for a dipole
+#		located in the i-th source voxel and oriented along Y axis. When
+#		"vector" FS are provided, source orientations will be calculated
+#		by parsing eigenvectors of the K-matrix.
+#				OR
+#		(n_chan x n_src) Numpy array of "scalar" FS for the sources.
+#		Each column of FS then corresponds to lead field of a dipole
+#		with known orientation.
+#		!!! When scalar FS are provided, MSMV calculation of source
+#		!!! orientations is skipped and the weights W
+#		!!! 	W = R^-1 H (H^T R^-1 H)^-1
+#		!!! are returned right away.
 #	r_inv	(n_chan x n_chan) An inverse of the data covariance matrix.
-#	n_cov	(n_chan x n_chan) The noise covariance matrix. If not specified
-#		(a bad idea), a diagonal white noise will be used
+#	n_cov	(n_chan x n_chan). The noise covariance matrix. If not specified
+#		(n_cov = None, a bad idea), a diagonal white noise will be used
 #	beam	(string) The beamformer type: one of "mpz", "mai", "mer", "rmer"
 #	c_avg	(n_chan x n_chan) Matrix of the second moments of the trial-
 #		averaged epochs, typically additionally averaged over a 
@@ -36,9 +46,10 @@ from numpy.linalg import cholesky, eig, inv, norm
 #
 # Output:	(w_mtx, u), where:
 #	w_mtx 	(n_chan x n_src) numpy array of the beamformer weights
-#	u	(3 x n_src)	array of source orientations	
+#	u	(3 x n_src)	array of source orientations, or None
+#		if scalar FS were provided.
 # -------------------------------------------------------------------------
-def construct_mcmv_weights(fs, r_inv, n_cov, beam = "mpz", c_avg = None):
+def construct_mcmv_weights(fs, r_inv, n_cov = None, beam = "mpz", c_avg = None):
 # -------------------------------------------------------------------------
 	# The dynamic range of eigenvalues is affected by the dynamic range
 	# of the EVs of the source correlation matrix. To get an idea of the
@@ -54,89 +65,98 @@ def construct_mcmv_weights(fs, r_inv, n_cov, beam = "mpz", c_avg = None):
 	MIN_RELATIVE_E_VAL = 0.001	# Min allowed ratio of the smallest (e_val -1) to the max (e_val-1)
 					# for power localizers, or without subtracting 1 for evoked localizers
 	beam_types = {"mpz":k_mpz, "mai":k_mai, "mer":k_mer, "rmer":k_rmer}
-	n_src, n_chan, tmp = fs.shape
 
-	# Sanity checks
-	if tmp != 3:
-		raise ValueError("fs should be a (n_src x n_chan x 3) numpy array")
+	if len(fs.shape) == 3:
+		# Vector forward solutions - calculate orientations
+	
+		n_src, n_chan, tmp = fs.shape
 
-	if r_inv.shape != (n_chan,n_chan):
-		raise ValueError("r_inv should be a ({} x {}) numpy array".
-				format(n_chan, n_chan))
+		# Sanity checks
+		if tmp != 3:
+			raise ValueError("fs should be a (n_src x n_chan x 3) numpy array")
 
-	if not is_pos_def(r_inv):
-		raise ValueError("r_inv should be a symmetric positively defined matrix")
+		if r_inv.shape != (n_chan,n_chan):
+			raise ValueError("r_inv should be a ({} x {}) numpy array".
+					format(n_chan, n_chan))
 
-	# Create a diagonal noise covariance matrix with a trace
-	# = 0.01/trace(r_inv) (kind-of 10 dB SNR)
-	if n_cov is None:
-		n_cov = 0.01 * trace(r_inv) * np.identity(n_chan)
-	elif n_cov.shape != (n_chan,n_chan):
-		raise ValueError("n_cov should be a ({} x {}) numpy array".
-				format(n_chan, n_chan))
-	elif not is_pos_def(n_cov):
-		raise ValueError("n_cov should be a symmetric positively defined matrix")
+		if not is_pos_def(r_inv):
+			raise ValueError("r_inv should be a symmetric positively defined matrix")
 
-	n_inv = inv(n_cov)
-	beam = beam.lower()
+		# Create a diagonal noise covariance matrix with a trace
+		# = 0.01/trace(r_inv) (kind-of 10 dB SNR)
+		if n_cov is None:
+			n_cov = 0.01 * trace(r_inv) * np.identity(n_chan)
+		elif n_cov.shape != (n_chan,n_chan):
+			raise ValueError("n_cov should be a ({} x {}) numpy array".
+					format(n_chan, n_chan))
+		elif not is_pos_def(n_cov):
+			raise ValueError("n_cov should be a symmetric positively defined matrix")
 
-	if not (beam in beam_types):
-		raise ValueError("beam should be one of: {}".format([*beam_types]))
+		n_inv = inv(n_cov)
+		beam = beam.lower()
 
-	is_evoked = False	# Flag that this is an evoked beamformer	
+		if not (beam in beam_types):
+			raise ValueError("beam should be one of: {}".format([*beam_types]))
 
-	if (beam in ("mer", "rmer")):
-		if c_avg is None:
-			raise ValueError("An evoked beamformer '{}' is requested, but c_avg is not specified"
-					.format(beam))
-		elif c_avg.shape != (n_chan,n_chan):
-			raise ValueError("c_avg should be a ({} x {}) numpy array".
-				format(n_chan, n_chan))
+		is_evoked = False	# Flag that this is an evoked beamformer	
 
-		is_evoked = True
+		if (beam in ("mer", "rmer")):
+			if c_avg is None:
+				raise ValueError("An evoked beamformer '{}' is requested, but c_avg is not specified"
+						.format(beam))
+			elif c_avg.shape != (n_chan,n_chan):
+				raise ValueError("c_avg should be a ({} x {}) numpy array".
+					format(n_chan, n_chan))
 
-	# L-matrix is simply a concatenated (along the voxels) version of fs:
-	l_mtx = np.concatenate(fs, axis = 1)	# this is a (n_chan x (n_src*3)) matrix
+			is_evoked = True
 
-	# Construct the K-matrix (in MCBF paper terms) depending on the beamformer type:
-	k_mtx = beam_types[beam](l_mtx, r_inv, n_cov, n_inv, c_avg)
+		# L-matrix is simply a concatenated (along the voxels) version of fs:
+		l_mtx = np.concatenate(fs, axis = 1)	# this is a (n_chan x (n_src*3)) matrix
 
-	# Perform K-matrix EVD; we only need at most 1st n_src biggest eigenvectors
-	e_vals, e_vecs = eig(k_mtx)
+		# Construct the K-matrix (in MCBF paper terms) depending on the beamformer type:
+		k_mtx = beam_types[beam](l_mtx, r_inv, n_cov, n_inv, c_avg)
 
-	# NOTE: Due to rounding errors the smallest 2*n_src e_vals, e_vecs have infinitasimal
-	# complex parts, causing the whole output to be cast to complex domain.
-	# Therefore:
-	e_vals = np.real(e_vals)
-	e_vecs = np.real(e_vecs)
+		# Perform K-matrix EVD; we only need at most 1st n_src biggest eigenvectors
+		e_vals, e_vecs = eig(k_mtx)
 
-	# DEBUG: yes, this might happen, but only due to rounding errors in last decimal digits
-	# if (not is_evoked) and np.any(e_vals < 1.):
-	#	print("WARNING: K-matrix eigenvalue smaller than 1 found")
+		# NOTE: Due to rounding errors the smallest 2*n_src e_vals, e_vecs have infinitasimal
+		# complex parts, causing the whole output to be cast to complex domain.
+		# Therefore:
+		e_vals = np.real(e_vals)
+		e_vecs = np.real(e_vecs)
 
-	idx = np.argsort(-e_vals)[:n_src]	# Indecies of n_src largest e_vals
-	e_vals = e_vals[idx]
-	e_vecs = e_vecs[:,idx]
+		# DEBUG: yes, this might happen, but only due to rounding errors in last decimal digits
+		# if (not is_evoked) and np.any(e_vals < 1.):
+		#	print("WARNING: K-matrix eigenvalue smaller than 1 found")
 
-	# Discard eigenvectors with e_vals too close to 1 or 0
-	tmp = 0. if is_evoked else 1.	# Value to subtract from e_vals depending on beam type 
-	tmp = (e_vals - tmp)
-	idx = (tmp / tmp[0] >= MIN_RELATIVE_E_VAL) # Keep only large enough eigenvalues
-	e_vals = e_vals[idx]	# Actually, those are never used
-	e_vecs = e_vecs[:,idx]
+		idx = np.argsort(-e_vals)[:n_src]	# Indecies of n_src largest e_vals
+		e_vals = e_vals[idx]
+		e_vecs = e_vecs[:,idx]
 
-	if np.any(np.iscomplex(e_vecs)):
-		raise ValueError("Got complex-valued eigenvectors of the K-matrix")
+		# Discard eigenvectors with e_vals too close to 1 or 0
+		tmp = 0. if is_evoked else 1.	# Value to subtract from e_vals depending on beam type 
+		tmp = (e_vals - tmp)
+		idx = (tmp / tmp[0] >= MIN_RELATIVE_E_VAL) # Keep only large enough eigenvalues
+		e_vals = e_vals[idx]	# Actually, those are never used
+		e_vecs = e_vecs[:,idx]
 
-	# Get source orientations
-	u = parse_eigenvectors(e_vecs)
+		if np.any(np.iscomplex(e_vecs)):
+			raise ValueError("Got complex-valued eigenvectors of the K-matrix")
+
+		# Get source orientations
+		u = parse_eigenvectors(e_vecs)
+
+		# Get scalar forward solutions
+		h_mtx = np.zeros((n_chan, n_src))
+		for i_src in range(n_src):
+			h_mtx[:,i_src] = dot(fs[i_src], u[:,i_src])
+	else:
+		# fs are already scalar forward solutions
+		h_mtx = fs
+		u = None
 
 	# Calculate the weights according to the expression
 	# W = R^-1 H (H^T R^-1 H)^-1
-	h_mtx = np.zeros((n_chan, n_src))
-	for i_src in range(n_src):
-		h_mtx[:,i_src] = dot(fs[i_src], u[:,i_src])
-
 	s_inv = inv(dot(h_mtx.T, dot(r_inv, h_mtx)))	# Inverse of S-matrix
 	w_mtx = dot(r_inv, dot(h_mtx, s_inv))
 
@@ -260,4 +280,75 @@ def parse_eigenvectors(v):
 
 	return u
 
+# -------------------------------------------------------------------------
+# Construct single source beamformer weights for a fixed set of n_src dipole locations,
+# given:
+#	- a triplet of forward solutions (FS) for each location (namely, FS
+# 	  for dipoles oriented along x, y, z directions in the head coordinates),
+# 	- an inverse of full data covariance matrix,
+#	- a noise covariance matrix, 
+# and for the evoked beamformers:
+#	- evoked fields second moments matrix.
+#
+# This function has the exact same signature as construct_mcmv_weights() and internally
+# calls the latter for each source in turn.
+#
+# Input:
+#	fs	(n_src x n_chan x 3) Numpy array of "vector" FS for the source
+#		voxels. For example, fs[i,:,1] is a forward solution for a dipole
+#		located in the i-th source voxel and oriented along Y axis. When
+#		"vector" FS are provided, source orientations will be calculated
+#		by parsing eigenvectors of the K-matrix.
+#				OR
+#		(n_chan x n_src) Numpy array of "scalar" FS for the sources.
+#		Each column of FS then corresponds to lead field of a dipole
+#		with known orientation.
+#		!!! When scalar FS are provided, MSMV calculation of source
+#		!!! orientations is skipped and the weights W
+#		!!! 	W = R^-1 H (H^T R^-1 H)^-1
+#		!!! are returned right away.
+#	r_inv	(n_chan x n_chan) An inverse of the data covariance matrix.
+#	n_cov	(n_chan x n_chan). The noise covariance matrix. If not specified
+#		(n_cov = None, a bad idea), a diagonal white noise will be used
+#	beam	(string) The beamformer type: one of "mpz", "mai", "mer", "rmer"
+#	c_avg	(n_chan x n_chan) Matrix of the second moments of the trial-
+#		averaged epochs, typically additionally averaged over a 
+#		time interval of interest:
+#			c_avg = < e(t) e^T(t) >
+#		where e(t) is a column vector of trial-averaged sensor 
+#		readings at time "t", and brackets <...> denote averaging
+#		over a chosen time interval
+#
+# Output:	(w_mtx, u), where:
+#	w_mtx 	(n_chan x n_src) numpy array of the beamformer weights
+#	u	(3 x n_src)	array of source orientations, or None
+#		if scalar FS were provided.
+# -------------------------------------------------------------------------
+def construct_single_source_weights(fs, r_inv, n_cov = None, beam = "mpz", c_avg = None):
+# -------------------------------------------------------------------------
+	if len(fs.shape) == 3:
+		# Vector forward solutions; need to calculate orientations	
+		n_src, n_chan, _ = fs.shape
+		w_mtx = np.zeros((n_chan, n_src))
+		u = np.zeros((3, n_src))
+
+		for i in range(n_src):
+			f = fs[i,:,:][np.newaxis,:]	# Make the shape (1, n_chan, 3) 
+			# Returned w, u1 shapes are (n_chan x 1), (3 x 1)
+			w, u1 = construct_mcmv_weights(f, r_inv, n_cov, beam, c_avg)
+			w_mtx[:,i] = w[:,0]
+			u[:,i] = u1[:,0]
+	else:
+		# Scalar forward solutions
+		n_chan, n_src = fs.shape
+		w_mtx = np.zeros((n_chan, n_src))
+		u = None
+
+		for i in range(n_src):
+			f = fs[:,i]
+			# Returned w's shape is (n_chan x 1)
+			w, _ = construct_mcmv_weights(f[:, np.newaxis], r_inv, n_cov, beam, c_avg)
+			w_mtx[:,i] = w[:,0]
+
+	return (w_mtx, u)
 
