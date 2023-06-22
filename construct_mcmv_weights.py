@@ -92,11 +92,12 @@ def construct_mcmv_weights(fs, r_inv, n_cov = None, beam = "mpz", c_avg = None):
 		elif not is_pos_def(n_cov):
 			raise ValueError("n_cov should be a symmetric positively defined matrix")
 
-		n_inv = inv(n_cov)
 		beam = beam.lower()
 
 		if not (beam in beam_types):
 			raise ValueError("beam should be one of: {}".format([*beam_types]))
+
+		n_inv = inv(n_cov) if beam == 'mai' else None	# n_inv is only needed for MAI
 
 		is_evoked = False	# Flag that this is an evoked beamformer	
 
