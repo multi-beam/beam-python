@@ -14,6 +14,7 @@ snr_db = -20	# Sensor level SNR in dB; -10 corresponds to amplitude SNR ~0.31
 		# Two-fold change in amp SNR corresponds to ~ 6 dB
 cc = 0.9	# Mutual correlation coefficient between all sources
 beam = "mpz"	# The beamformer type: one of "mpz", "mai", "mer", "rmer"
+return_h = True    # Flag to return scalar FS
 
 # Generate random forward solutions
 fs = randn(n_src, n_chan, 3)
@@ -64,7 +65,14 @@ l = np.reshape(dot(h_mtx, s), (n_chan,1))	# Make it a column vector
 c_avg = dot(l, l.T)
 
 # Get the weights
-(w, u) = construct_mcmv_weights(fs, r_inv, n_cov = n_cov, beam = beam, c_avg = c_avg)
+res = construct_mcmv_weights(fs, r_inv, n_cov = n_cov, beam = beam, c_avg = c_avg,
+                                return_h = return_h)
+w, u = res[:2]
+
+# Get the scalar forward solutions, if requested
+if return_h:
+    h = res[2]
+    assert np.allclose(h, np.einsum('scv,vs->cs',fs,u))
 
 # Verification. Print the true source orientations:
 print("u_src:\n", u_src)
