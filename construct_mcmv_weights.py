@@ -4,8 +4,9 @@
 # -------------------------------------------------------------------------
 
 import numpy as np
+import warnings
 #import matplotlib.pyplot as plt        # For DEBUG only
-from numpy import dot, trace
+from numpy import dot
 from numpy.linalg import cholesky, eig, inv, norm
 
 # -------------------------------------------------------------------------
@@ -87,10 +88,9 @@ def construct_mcmv_weights(fs, r_inv, n_cov = None, beam = "mpz", c_avg = None,
         if not is_pos_def(r_inv):
             raise ValueError("r_inv should be a symmetric positively defined matrix")
 
-        # Create a diagonal noise covariance matrix with a trace
-        # = 0.01/trace(r_inv) (kind-of 10 dB SNR)
+        # Create a substitute diagonal noise covariance matrix when n_cov is not provided.
         if n_cov is None:
-            n_cov = 0.01 * trace(r_inv) * np.identity(n_chan)
+            n_cov = get_default_noise_covariance(r_inv)
         elif n_cov.shape != (n_chan,n_chan):
             raise ValueError("n_cov should be a ({} x {}) numpy array".
                     format(n_chan, n_chan))
@@ -179,6 +179,34 @@ def is_pos_def(a):
         return True
     except:
         return False
+
+# -------------------------------------------------------------------------
+# Construct a substitute diagonal noise covariance matrix from r_inv.
+# -------------------------------------------------------------------------
+def get_default_noise_covariance(r_inv):
+# -------------------------------------------------------------------------
+    """
+    Construct a white diagonal noise matrix ``n_cov``with all diagonal elements equal to
+    ``e_min/2``, where ``e_min`` is the minimal non-zero eigenvalue of the 
+    full covariance matrix R. This ensures that the difference ``R - n_cov``
+    remains a non-negative matrix.
+
+    Input:
+      r_inv   (n_chan x n_chan) An inverse of the full data covariance matrix ``R``.
+    Output:
+      n+cov   (n_chan x n_chan) The diagonal noise covariance
+
+    """
+    warnings.warn(
+            '\n\nWARNING: n_cov was not provided (STRONGLY NOT RECOMMENDED); using a substitute diagonal white noise matrix.\n',
+        UserWarning,
+        stacklevel=2,
+    )
+
+    # Mind that eigenvalues of R are inverses of those of R^-1
+    e_max = np.max(np.linalg.eigvalsh(r_inv))       # This is (1/e_min) of R
+    sigma2 = 1.0 / (2.0 * e_max)                    # sigma2=0.5*e_max^-1 = 0.5*e_min
+    return sigma2 * np.identity(r_inv.shape[0])
 
 # K-matrix calculation for MPZ: K = T^-1 S, where
 #   S = L^T R^-1 L
